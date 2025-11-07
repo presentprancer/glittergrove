@@ -1,5 +1,10 @@
 # cogs/utils/data_store.py
 # Canonical profile + economy + inventory store for Glittergrove.
+#
+# This module now lives under ``cogs/utils`` so every cog—boss battle included—
+# pulls from the exact same helpers instead of carrying duplicate copies.
+# A lightweight shim at ``data_store (6).py`` re-exports this module so older
+# imports (and pending merges) keep working without conflict.
 # Single source of truth; safe JSON I/O; milestone hooks.
 # ⬇️ Caps note:
 # By default, ALL per-card caps are DISABLED (unlimited copies).
@@ -13,6 +18,7 @@ import threading
 import asyncio
 import logging
 import inspect
+from collections import Counter
 from pathlib import Path
 from datetime import datetime, timezone
 from typing import Any
@@ -70,6 +76,8 @@ PROJECT_ROOT  = Path(__file__).parent.parent.parent.resolve()
 DATA_DIR      = PROJECT_ROOT / "data"
 PROFILES_FILE = DATA_DIR / "profiles.json"
 TXNS_FILE     = DATA_DIR / "transactions.json"
+LEGACY_PROFILES_FILE = DATA_DIR / "profile.json"
+LEGACY_TXNS_FILE     = DATA_DIR / "transaction.json"
 DATA_DIR.mkdir(parents=True, exist_ok=True)
 
 MAX_TXNS_PER_USER   = int(os.getenv("MAX_TXNS_PER_USER", "500"))
@@ -135,6 +143,22 @@ def _now_iso() -> str:
     return datetime.now(timezone.utc).isoformat()
 
 # ─── PROFILE SHAPE ─────────────────────────────────────────────────────────
+def _resolve_data_file(preferred: Path, legacy: Path) -> Path:
+    if preferred.exists():
+        return preferred
+    if legacy.exists():
+        try:
+            legacy.replace(preferred)
+            return preferred
+        except Exception:
+            try:
+                preferred.write_bytes(legacy.read_bytes())
+                return preferred
+            except Exception:
+                return legacy
+    return preferred
+
+
 def _ensure_profile_shape(prof: dict) -> dict:
     prof = dict(prof or {})
     prof.setdefault("user_id", None)
@@ -142,7 +166,25 @@ def _ensure_profile_shape(prof: dict) -> dict:
     prof.setdefault("created_at", prof.get("created_at") or _now_iso())
 
     prof.setdefault("gold_dust", 0)
-    prof.setdefault("inventory", [])            # list, duplicates allowed
+
+    legacy_cards = prof.get("cards")
+    inventory = prof.get("inventory")
+    cleaned: list[str] = []
+    if isinstance(inventory, list):
+        cleaned = [str(x) for x in inventory if isinstance(x, str)]
+    if isinstance(legacy_cards, list):
+        legacy_clean = [str(x) for x in legacy_cards if isinstance(x, str)]
+        if cleaned:
+            current_counts = Counter(cleaned)
+            legacy_counts = Counter(legacy_clean)
+            for item, needed in legacy_counts.items():
+                short = needed - current_counts.get(item, 0)
+                if short > 0:
+                    cleaned.extend([item] * short)
+        else:
+            cleaned = legacy_clean
+        prof["cards"] = list(cleaned)
+    prof["inventory"] = cleaned
     prof.setdefault("faction", None)            # display name (mapped elsewhere to slug)
     prof.setdefault("faction_points", 0)
     prof.setdefault("faction_milestones", [])
@@ -170,7 +212,8 @@ def _ensure_profile_shape(prof: dict) -> dict:
 # ─── PROFILES ──────────────────────────────────────────────────────────────
 def _load_profiles() -> dict:
     with _profiles_lock:
-        profiles = _load_json(PROFILES_FILE)
+        path = _resolve_data_file(PROFILES_FILE, LEGACY_PROFILES_FILE)
+        profiles = _load_json(path)
         if not isinstance(profiles, dict):
             profiles = {}
 
@@ -182,12 +225,13 @@ def _load_profiles() -> dict:
             if before != json.dumps(normalized, sort_keys=True, default=str):
                 changed = True
         if changed:
-            _save_json(PROFILES_FILE, profiles)
+            _save_json(path, profiles)
         return profiles
 
 def _save_profiles(profiles: dict) -> None:
     with _profiles_lock:
-        _save_json(PROFILES_FILE, profiles)
+        path = _resolve_data_file(PROFILES_FILE, LEGACY_PROFILES_FILE)
+        _save_json(path, profiles)
 
 def get_profile(user_id: int | str, display_name: str | None = None) -> dict:
     uid = str(user_id)
@@ -237,12 +281,14 @@ def _record_txn_locked(txns: dict, user_id: str, amount: int, reason: str, meta:
 
 def _load_txns() -> dict:
     with _txn_lock:
-        txns = _load_json(TXNS_FILE)
+        path = _resolve_data_file(TXNS_FILE, LEGACY_TXNS_FILE)
+        txns = _load_json(path)
         return txns if isinstance(txns, dict) else {}
 
 def _save_txns(txns: dict) -> None:
     with _txn_lock:
-        _save_json(TXNS_FILE, txns)
+        path = _resolve_data_file(TXNS_FILE, LEGACY_TXNS_FILE)
+        _save_json(path, txns)
 
 def _write_txns_nonblocking(txns: dict) -> None:
     t = threading.Thread(target=_save_txns, args=(txns,), daemon=True)
