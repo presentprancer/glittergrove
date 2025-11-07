@@ -129,7 +129,6 @@ class WeaknessRotator(commands.Cog):
 
     @app_commands.default_permissions(administrator=True)
     @grp.command(name="status", description="Show rotation status and current weakness")
-    @app_commands.guilds(Object(id=HOME_GUILD_ID))
     async def rotate_status(self, inter: discord.Interaction):
         if not await self._require_admin(inter): return
         await inter.response.defer(ephemeral=True)
@@ -145,7 +144,6 @@ class WeaknessRotator(commands.Cog):
 
     @app_commands.default_permissions(administrator=True)
     @grp.command(name="toggle", description="Enable or disable auto-rotation")
-    @app_commands.guilds(Object(id=HOME_GUILD_ID))
     async def rotate_toggle(self, inter: discord.Interaction, enabled: bool):
         if not await self._require_admin(inter): return
         await inter.response.defer(ephemeral=False)
@@ -157,7 +155,6 @@ class WeaknessRotator(commands.Cog):
 
     @app_commands.default_permissions(administrator=True)
     @grp.command(name="set_minutes", description="Set the auto-rotation interval (minutes)")
-    @app_commands.guilds(Object(id=HOME_GUILD_ID))
     async def rotate_set_minutes(self, inter: discord.Interaction, minutes: int):
         if not await self._require_admin(inter): return
         minutes = max(1, minutes)
@@ -171,7 +168,6 @@ class WeaknessRotator(commands.Cog):
 
     @app_commands.default_permissions(administrator=True)
     @grp.command(name="now", description="Rotate the weakness immediately")
-    @app_commands.guilds(Object(id=HOME_GUILD_ID))
     async def rotate_now(self, inter: discord.Interaction):
         if not await self._require_admin(inter): return
         await inter.response.defer(ephemeral=False)
@@ -196,7 +192,6 @@ class WeaknessRotator(commands.Cog):
         app_commands.Choice(name="Verdant Guard", value="verdant"),
         app_commands.Choice(name="Mistveil Kin", value="mistveil"),
     ])
-    @app_commands.guilds(Object(id=HOME_GUILD_ID))
     async def rotate_set(self, inter: discord.Interaction, slug: app_commands.Choice[str]):
         if not await self._require_admin(inter): return
         await inter.response.defer(ephemeral=False)
