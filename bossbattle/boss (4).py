@@ -88,6 +88,22 @@ def _safe_name(user: Optional[discord.abc.User]) -> str:
         pass
     return "Unknown"
 
+
+# ─────────────────────────────────────────────────────────────────────────────
+# Interaction helpers
+# ─────────────────────────────────────────────────────────────────────────────
+
+async def _send_ephemeral(interaction: discord.Interaction, message: str) -> None:
+    """Safely deliver an ephemeral response regardless of prior state."""
+    try:
+        if interaction.response.is_done():
+            await interaction.followup.send(message, ephemeral=True)
+        else:
+            await interaction.response.send_message(message, ephemeral=True)
+    except discord.InteractionResponded:
+        await interaction.followup.send(message, ephemeral=True)
+
+
 # ─────────────────────────────────────────────────────────────────────────────
 # Access control
 # ─────────────────────────────────────────────────────────────────────────────
@@ -108,10 +124,7 @@ def is_true_admin(inter: discord.Interaction) -> bool:
 async def require_admin(inter: discord.Interaction) -> bool:
     if is_true_admin(inter):
         return True
-    try:
-        await inter.response.send_message("❌ Admin only.", ephemeral=True)
-    except discord.InteractionResponded:
-        await inter.followup.send("❌ Admin only.", ephemeral=True)
+    await _send_ephemeral(inter, "❌ Admin only.")
     return False
 
 
@@ -133,10 +146,7 @@ async def require_raid_access(inter: discord.Interaction) -> bool:
     if member and _has_raid_access(member):
         return True
     msg = "⛔ This command is limited to faction raiders. Ask a mod for access."
-    try:
-        await inter.response.send_message(msg, ephemeral=True)
-    except discord.InteractionResponded:
-        await inter.followup.send(msg, ephemeral=True)
+    await _send_ephemeral(inter, msg)
     return False
 
 
@@ -389,10 +399,7 @@ class BossCog(commands.Cog):
         last = _LAST_HIT_AT.get(uid_int, 0.0)
         wait = USER_COOLDOWN_SEC - (now_ts - last)
         if wait > 0:
-            try:
-                await interaction.response.send_message(f"⏳ Cooldown {wait:.1f}s…", ephemeral=True)
-            except discord.InteractionResponded:
-                await interaction.followup.send(f"⏳ Cooldown {wait:.1f}s…", ephemeral=True)
+            await _send_ephemeral(interaction, f"⏳ Cooldown {wait:.1f}s…")
             return
         _LAST_HIT_AT[uid_int] = now_ts
         # -------------------------------------------------------------------
@@ -400,16 +407,10 @@ class BossCog(commands.Cog):
         # Quick dead check before spending energy (cheap read)
         b0 = await load_boss()
         if int(b0.get("hp", 0)) <= 0:
-            try:
-                await interaction.response.send_message(
-                    "💤 The boss is already defeated. Mods can /boss_admin spawn the next one.",
-                    ephemeral=True,
-                )
-            except discord.InteractionResponded:
-                await interaction.followup.send(
-                    "💤 The boss is already defeated. Mods can /boss_admin spawn the next one.",
-                    ephemeral=True,
-                )
+            await _send_ephemeral(
+                interaction,
+                "💤 The boss is already defeated. Mods can /boss_admin spawn the next one.",
+            )
             return
 
         # Materialize regen so spend sees the real amount
@@ -418,16 +419,10 @@ class BossCog(commands.Cog):
         # Spend energy (only after we know it's alive)
         ok, left = _spend_energy(uid_str)
         if not ok:
-            try:
-                await interaction.response.send_message(
-                    f"❌ You're out of Raid Energy. +1 in **{ENERGY_REGEN_MINUTES} min** (cap {ENERGY_MAX}).",
-                    ephemeral=True,
-                )
-            except discord.InteractionResponded:
-                await interaction.followup.send(
-                    f"❌ You're out of Raid Energy. +1 in **{ENERGY_REGEN_MINUTES} min** (cap {ENERGY_MAX}).",
-                    ephemeral=True,
-                )
+            await _send_ephemeral(
+                interaction,
+                f"❌ You're out of Raid Energy. +1 in **{ENERGY_REGEN_MINUTES} min** (cap {ENERGY_MAX}).",
+            )
             return
 
         # From here on we’ll reply publicly
@@ -1135,7 +1130,7 @@ class BossCog(commands.Cog):
             f"\n⏱️ Regen: **+1 every {ENERGY_REGEN_MINUTES} min**"
             f"\n🛒 Purchases (24h): **{purchases_used}**"
         )
-        await interaction.response.send_message(msg, ephemeral=True)
+        await _send_ephemeral(interaction, msg)
 
     @energy_group.command(name="claim", description="Claim your daily Raid Energy")
     async def energy_claim(self, interaction: discord.Interaction):
@@ -1143,7 +1138,7 @@ class BossCog(commands.Cog):
             return
         uid = str(interaction.user.id)
         ok, msg, _new_total = claim_daily(uid)  # returns friendly text
-        await interaction.response.send_message(msg, ephemeral=True)
+        await _send_ephemeral(interaction, msg)
 
     @energy_group.command(name="buy", description="Buy Raid Energy with Gold Dust (enforces 24h limit)")
     @app_commands.describe(amount="How many energy to buy")
@@ -1151,28 +1146,32 @@ class BossCog(commands.Cog):
         if not await require_raid_access(interaction):
             return
         if amount <= 0:
-            return await interaction.response.send_message("Choose a positive amount.", ephemeral=True)
+            await _send_ephemeral(interaction, "Choose a positive amount.")
+            return
 
         uid = str(interaction.user.id)
 
         # Apply regen so math is real
         cur = _get_energy(uid)
         if cur >= ENERGY_MAX:
-            return await interaction.response.send_message("You're already at max energy.", ephemeral=True)
+            await _send_ephemeral(interaction, "You're already at max energy.")
+            return
 
         ok, why = buy_energy_allowed(uid)
         if not ok:
-            return await interaction.response.send_message(why, ephemeral=True)
+            await _send_ephemeral(interaction, why)
+            return
 
         prof = get_profile(uid) or {}
         gold = int(prof.get("gold_dust", 0))
         amount = min(amount, ENERGY_MAX - cur)
         cost = amount * ENERGY_SHOP_PRICE
         if gold < cost:
-            return await interaction.response.send_message(
+            await _send_ephemeral(
+                interaction,
                 f"Not enough Gold Dust. Need **{cost}**, you have **{gold}**.",
-                ephemeral=True,
             )
+            return
 
         # Deduct, grant, log
         update_profile(uid, gold_dust=gold - cost)
@@ -1186,9 +1185,9 @@ class BossCog(commands.Cog):
                 record_transaction(uid, -cost, note=f"buy raid energy x{amount}")
 
         new_total = _get_energy(uid)
-        await interaction.response.send_message(
+        await _send_ephemeral(
+            interaction,
             f"✅ Bought **{amount}** energy for **{cost}** Gold Dust. Now **{new_total}/{ENERGY_MAX}**.",
-            ephemeral=True,
         )
 
     # Register groups + top-level cmds on_ready
