@@ -57,7 +57,7 @@ class WeaknessRotator(commands.Cog):
 
     async def _post_board(self, guild: Optional[discord.Guild], content: str):
         try:
-            await send_board(guild, content=content)
+            await send_board(guild, bot=self.bot, content=content)
         except Exception:
             pass
 
