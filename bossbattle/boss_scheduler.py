@@ -62,8 +62,13 @@ class BossScheduler(commands.Cog):
                 if int(b.get("hp", 0)) <= 0 or b.get("kill_handled"):
                     return
                 cutoff = _now() - timedelta(minutes=BOSS_IDLE_HEAL_MINUTES)
-                recent = [a for a in (b.get("last_actions") or []) if _parse_iso(a.get("ts")) and _parse_iso(a.get("ts")) > cutoff]
-                if recent:
+                recent_ts = None
+                for action in b.get("last_actions") or []:
+                    ts = _parse_iso(action.get("ts"))
+                    if ts and ts > cutoff:
+                        recent_ts = ts
+                        break
+                if recent_ts:
                     return
                 mx = max(1, int(b.get("max_hp", 1)))
                 heal = max(1, int(mx * BOSS_IDLE_HEAL_PCT))

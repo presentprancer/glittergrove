@@ -54,6 +54,8 @@ DEFAULT_DAILY_HP  = int(os.getenv("BOSS_DAILY_HP", "500000")) or 500000
 DEFAULT_WEEKLY_HP = int(os.getenv("BOSS_WEEKLY_HP", "1000000")) or 1000000
 
 ROTATE_MINUTES = int(os.getenv("BOSS_WEAKNESS_ROTATE_MINUTES", "2")) or 2
+# Backwards compat for legacy imports (cogs expect this name)
+BOSS_WEAKNESS_ROTATE_MINUTES = ROTATE_MINUTES
 
 # Idle heal triggers only when there are no hits in the last N minutes
 IDLE_HEAL_MINUTES = int(os.getenv("BOSS_IDLE_HEAL_MINUTES", "30")) or 30

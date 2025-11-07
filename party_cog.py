@@ -309,6 +309,16 @@ class PartyCog(commands.Cog):
         in_fall  = is_fall_season()
         in_lunar = is_lunar_event_active()
 
+        if not in_lunar and "lunar" in rarities:
+            rarities = [r for r in rarities if r != "lunar"]
+            if not rarities:
+                await send(
+                    interaction,
+                    "⚠️ Lunar pool is unavailable outside the event, and no other cards are loaded.",
+                    ephemeral=True,
+                )
+                return
+
         # Announcement + role ping selection
         if in_lunar:
             title = "🌕 Lunar Party Drop!"
