@@ -1,9 +1,15 @@
-"""Legacy data_store entrypoint.
+# cogs/utils/data_store.py
+# Canonical profile + economy + inventory store for Glittergrove.
+#
+# This module now lives under ``cogs/utils`` so every cog—boss battle included—
+# pulls from the exact same helpers instead of carrying duplicate copies.
+# A lightweight shim at ``data_store (6).py`` re-exports this module so older
+# imports (and pending merges) keep working without conflict.
+# Single source of truth; safe JSON I/O; milestone hooks.
+# ⬇️ Caps note:
+# By default, ALL per-card caps are DISABLED (unlimited copies).
+# To re-enable caps later, set DISABLE_CARD_CAPS=0 in your environment.
 
-This thin shim re-exports the canonical helpers from ``cogs.utils.data_store``
-so any code (or pending merges) that still reference the historical
-``data_store (6).py`` path keep working without conflicts.
-"""
 from __future__ import annotations
 
 import os
@@ -348,9 +354,312 @@ def _is_founder_filename(filename: str) -> bool:
     except Exception:
         return False
 
-from __future__ import annotations
+def cap_for(filename: str) -> int:
+    """Total allowed copies of a single filename in inventory.
+    If DISABLE_CARD_CAPS is true (default), effectively 'infinite'.
+    If caps are re-enabled: founders cap at 1; others at 1 + MAX_DUPES_PER_CARD.
+    """
+    if DISABLE_CARD_CAPS:
+        return 2_000_000_000  # effectively unlimited
+    return 1 if _is_founder_filename(filename) else (1 + MAX_DUPES_PER_CARD)
 
-from cogs.utils.data_store import *  # type: ignore  # noqa: F401,F403
+def inventory_counts(user_id: int | str) -> dict[str, int]:
+    prof = get_profile(user_id)
+    counts: dict[str, int] = {}
+    for f in list(prof.get("inventory", [])):
+        counts[f] = counts.get(f, 0) + 1
+    return counts
 
-# Re-export the public API for explicit star import users
-from cogs.utils.data_store import __all__  # noqa: F401
+def at_cap(user_id: int | str, filename: str) -> bool:
+    if DISABLE_CARD_CAPS:
+        return False
+    counts = inventory_counts(user_id)
+    return counts.get(filename, 0) >= cap_for(filename)
+
+def _count_item(items: list[str], filename: str) -> int:
+    return sum(1 for x in items if x == filename)
+
+def give_card(user_id: int | str, filename: str) -> dict:
+    uid = str(user_id)
+    profiles = _load_profiles()
+    prof = _ensure_profile_shape(profiles.get(uid, {}))
+    inv = list(prof.get("inventory", []))
+    current = _count_item(inv, filename)
+    if current < cap_for(filename):
+        inv.append(filename)
+        prof["inventory"] = inv
+        profiles[uid] = prof
+        _save_profiles(profiles)
+    return prof
+
+def give_cards(user_id: int | str, filenames: list[str]) -> dict:
+    uid = str(user_id)
+    if not filenames:
+        return get_profile(uid)
+    profiles = _load_profiles()
+    prof = _ensure_profile_shape(profiles.get(uid, {}))
+    inv = list(prof.get("inventory", []))
+    changed = False
+    counts: dict[str, int] = {}
+    for f in inv:
+        counts[f] = counts.get(f, 0) + 1
+    for f in filenames:
+        if counts.get(f, 0) < cap_for(f):
+            inv.append(f)
+            counts[f] = counts.get(f, 0) + 1
+            changed = True
+    if changed:
+        prof["inventory"] = inv
+        profiles[uid] = prof
+        _save_profiles(profiles)
+    return prof
+
+def take_card(user_id: int | str, filename: str) -> dict:
+    uid = str(user_id)
+    profiles = _load_profiles()
+    prof = _ensure_profile_shape(profiles.get(uid, {}))
+    inv = list(prof.get("inventory", []))
+    if filename in inv:
+        inv.remove(filename)  # remove one copy
+        prof["inventory"] = inv
+        profiles[uid] = prof
+        _save_profiles(profiles)
+    return prof
+
+def has_card(user_id: int | str, filename: str) -> bool:
+    prof = get_profile(user_id)
+    return filename in prof.get("inventory", [])
+
+# ─── PARTY LOGGING (used by party_cog) ─────────────────────────────────────
+def log_party(starter_id: int | str, channel_id: int | str, count: int, cost: int, started: bool = True, **_ignored):
+    uid = str(starter_id)
+    profiles = _load_profiles()
+    prof = _ensure_profile_shape(profiles.get(uid, {}))
+
+    party = prof.get("party", {}) or {}
+    party["started"] = int(party.get("started", 0)) + (1 if started else 0)
+    party["last_started_at"] = _now_iso()
+    prof["party"] = party
+
+    prof["party_history"]    = prof.get("party_history", [])
+    prof["party_history_ts"] = prof.get("party_history_ts", [])
+    prof["party_history"].append(int(count))
+    prof["party_history_ts"].append(_now_iso())
+
+    profiles[uid] = prof
+    _save_profiles(profiles)
+
+    try:
+        record_transaction(
+            uid,
+            -abs(int(cost)),
+            reason="party_cost",
+            meta={"channel_id": str(channel_id), "cards": int(count)},
+        )
+    except Exception:
+        logger.exception("log_party: failed to write party transaction")
+
+# ─── MILESTONES ────────────────────────────────────────────────────────────
+def _normalize_milestones():
+    try:
+        ms = FACTION_MILESTONES
+    except Exception:
+        logger.exception("FACTION_MILESTONES not available; treating as empty")
+        return []
+    out = []
+    try:
+        for idx, m in enumerate(ms, start=1):
+            if isinstance(m, int):
+                out.append({"points": int(m), "name": f"T{idx}", "role_id": None})
+            elif isinstance(m, dict):
+                d = dict(m)
+                d["points"] = int(d.get("points", 0))
+                d.setdefault("name", d.get("label") or f"T{idx}")
+                d.setdefault("role_id", d.get("role") or d.get("role_id"))
+                out.append(d)
+        out.sort(key=lambda x: x["points"])
+    except Exception:
+        logger.exception("Failed to normalize FACTION_MILESTONES")
+        out = []
+    return out
+
+async def _safe_announce_milestone(bot, uid: str, prof: dict, awards: list[dict], announce_channel_id: int | None):
+    try:
+        sig = inspect.signature(announce_milestone)
+        params = sig.parameters
+        if "announce_channel_id" in params:
+            return await announce_milestone(bot, uid, prof, awards, announce_channel_id=announce_channel_id)
+        if "channel_id" in params:
+            return await announce_milestone(bot, uid, prof, awards, channel_id=announce_channel_id)
+        return await announce_milestone(bot, uid, prof, awards)
+    except TypeError:
+        return await announce_milestone(bot, uid, prof, awards)
+    except Exception:
+        logger.exception("announce_milestone failed")
+        return None
+
+def _to_int(x, default=0):
+    try:
+        return int(x)
+    except Exception:
+        try:
+            return int(str(x))
+        except Exception:
+            return default
+
+def _claimed_thresholds(prof: dict) -> set[int]:
+    out = set()
+    for c in (prof.get("faction_milestones", []) or []):
+        try:
+            out.add(int(c))
+        except Exception:
+            s = str(c)
+            if s.isdigit():
+                out.add(int(s))
+    return out
+
+async def _resolve_guild_and_member(bot, uid: str, preferred_gid: int | None):
+    member = None
+    guild = None
+    if preferred_gid:
+        guild = bot.get_guild(preferred_gid)
+        if guild:
+            try:
+                member = guild.get_member(int(uid)) or await guild.fetch_member(int(uid))
+            except Exception:
+                member = None
+    if member is None:
+        for g in list(bot.guilds):
+            try:
+                m = g.get_member(int(uid)) or await g.fetch_member(int(uid))
+                if m:
+                    guild, member = g, m
+                    break
+            except Exception:
+                continue
+    return guild, member
+
+async def _award_milestones_task(uid: str, awards: list[dict], announce_channel_id: int | None):
+    bot = _effective_bot()
+    if bot is None:
+        logger.warning("[Milestones] No bot reference; cannot award right now.")
+        return
+
+    preferred_gid = _to_int(os.getenv("HOME_GUILD_ID", "0"), 0) or None
+    guild, member = await _resolve_guild_and_member(bot, uid, preferred_gid)
+
+    profiles = _load_profiles()
+    prof = _ensure_profile_shape(profiles.get(str(uid), {}))
+    claimed = _claimed_thresholds(prof)
+    changed = False
+
+    for m in awards:
+        t = _to_int(m.get("points"), 0)
+        if t <= 0 or t in claimed:
+            continue
+
+        role_id = _to_int(m.get("role_id") or m.get("role") or 0, 0)
+        if role_id and member and guild:
+            role = guild.get_role(role_id)
+            if role and (role not in member.roles):
+                try:
+                    await member.add_roles(role, reason=f"Reached {t} faction points")
+                    logger.info(f"[Milestones] Added role {role.name} to {member} for {t}")
+                except Exception:
+                    logger.exception(f"[Milestones] Failed to add role {role_id} to {uid}")
+
+        gold_amt = _to_int(m.get("gold", m.get("gold_dust")), 0)
+        if gold_amt > 0:
+            try:
+                # run add_gold_dust off-thread to avoid blocking
+                await asyncio.to_thread(add_gold_dust, uid, gold_amt, f"Faction milestone {t}")
+            except Exception:
+                logger.exception(f"[Milestones] Failed to grant {gold_amt} gold to {uid} for {t}")
+
+        claimed.add(t)
+        changed = True
+
+    if changed:
+        prof["faction_milestones"] = sorted(claimed)
+        profiles[str(uid)] = prof
+        _save_profiles(profiles)
+
+    try:
+        await _safe_announce_milestone(bot, str(uid), prof, awards, announce_channel_id)
+    except Exception:
+        logger.exception("[Milestones] announce_milestone failed")
+
+def add_faction_points(user_id: int | str, points: int, reason: str = "", *, announce_channel_id: int | None = None) -> int:
+    uid = str(user_id)
+    profiles = _load_profiles()
+    prof = _ensure_profile_shape(profiles.get(uid, {}))
+
+    old_points = int(prof.get("faction_points", 0))
+    new_points = old_points + int(points)
+    prof["faction_points"] = new_points
+
+    milestones = _normalize_milestones()
+    just_crossed = [m for m in milestones if old_points < int(m.get("points", 0)) <= new_points]
+
+    already = _claimed_thresholds(prof)
+    awards = [m for m in just_crossed if int(m.get("points", 0)) not in already]
+
+    profiles[uid] = prof
+    _save_profiles(profiles)
+
+    if awards and _effective_bot() is not None:
+        env_ch = (os.getenv("FACTION_MILESTONE_CHANNEL_ID") or "").strip()
+        env_id = int(env_ch) if env_ch.isdigit() else None
+        ch_id = announce_channel_id if announce_channel_id is not None else env_id
+
+        try:
+            asyncio.get_running_loop().create_task(_award_milestones_task(uid, awards, ch_id))
+        except RuntimeError:
+            # If no loop, run directly (not typical inside bot, but safe)
+            asyncio.run(_award_milestones_task(uid, awards, ch_id))
+
+    try:
+        record_transaction(
+            uid,
+            int(points),
+            reason=reason or "faction_points",
+            meta={"awards": [str(m.get("points")) for m in awards]},
+        )
+    except Exception:
+        logger.exception("add_faction_points: failed to log transaction")
+
+    return new_points
+
+# ─── LEADERBOARDS ───────────────────────────────────────────────────────────
+def top_faction_points(limit: int = 10) -> list[tuple[str, int]]:
+    profs = _load_profiles()
+    pairs = [(uid, int(p.get("faction_points", 0))) for uid, p in profs.items()]
+    pairs.sort(key=lambda x: x[1], reverse=True)
+    return pairs[:limit]
+
+# ─── CLEANUP INVENTORY (Option C — manual, safe) ───────────────────────────
+def cleanup_inventory(valid_filenames: set[str] | list[str]) -> dict[str, list[str]]:
+    """
+    Remove items *not* in valid_filenames.
+
+    ✅ SAFE — only runs when an admin explicitly calls it.
+    ✅ Keeps dupes for valid items.
+    ✅ Does NOT run automatically.
+
+    valid_filenames should be canonical filenames (e.g. 'er0042.png').
+    """
+    removed  = {}
+    profiles = _load_json(PROFILES_FILE)
+    if not isinstance(profiles, dict):
+        profiles = {}
+    valid = set(valid_filenames)
+    for uid, prof in profiles.items():
+        inv = list((prof or {}).get("inventory", []))
+        bad = [x for x in inv if x not in valid]
+        if bad:
+            prof["inventory"] = [x for x in inv if x in valid]  # keep dupes of valid
+            profiles[uid]     = prof
+            removed[uid]      = bad
+            logger.info(f"[Cleanup] {uid}: removed invalid items {bad}")
+    _save_profiles(profiles)
+    return removed
